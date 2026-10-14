@@ -1,6 +1,7 @@
 import logging
 
 from homeassistant.core import (
+    Context,
     HomeAssistant,
     callback,
     CoreState,
@@ -238,7 +239,7 @@ class ActionHandler:
             self.hass, "action_queue_finished", self.async_cleanup_queues
         )
 
-    async def async_queue_actions(self, data: ScheduleEntry, skip_initial_execution = False):
+    async def async_queue_actions(self, data: ScheduleEntry, skip_initial_execution = False, context=None):
         """add new actions to queue"""
         await self.async_empty_queue()
 
@@ -247,13 +248,15 @@ class ActionHandler:
         condition_type = data[const.ATTR_CONDITION_TYPE]
         track_conditions = data[const.ATTR_TRACK_CONDITIONS]
 
+        context = context or Context()
+
         # create an ActionQueue object per targeted entity (such that the tasks are handled independently)
         for action in actions:
             entity = action[ATTR_ENTITY_ID] if ATTR_ENTITY_ID in action else "none"
 
             if entity not in self._queues:
                 self._queues[entity] = ActionQueue(
-                    self.hass, self.id, conditions, condition_type, track_conditions
+                    self.hass, self.id, conditions, condition_type, track_conditions, context
                 )
 
             self._queues[entity].add_action(action)
@@ -319,6 +322,7 @@ class ActionQueue:
         conditions: list,
         condition_type: str,
         track_conditions: bool,
+        context=None,
     ):
         """create a new action queue"""
         self.hass = hass
@@ -334,6 +338,7 @@ class ActionQueue:
         self.queue_busy = False
         self._track_conditions = track_conditions
         self._wait_for_available = True
+        self.context = context
 
         for condition in conditions:
             if (
@@ -613,6 +618,7 @@ class ActionQueue:
                 await async_call_from_config(
                     self.hass,
                     task,
+                    context=self.context,
                 )
             task_idx = task_idx + 1
 

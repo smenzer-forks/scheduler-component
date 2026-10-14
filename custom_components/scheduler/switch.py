@@ -21,7 +21,7 @@ from homeassistant.const import (
     CONF_CONDITIONS,
 )
 from homeassistant.components.alarm_control_panel import AlarmControlPanelState
-from homeassistant.core import callback
+from homeassistant.core import Context, callback
 from homeassistant.helpers.entity import ToggleEntity, EntityCategory
 from homeassistant.helpers.event import (
     async_call_later,
@@ -265,11 +265,36 @@ class ScheduleEntity(ToggleEntity):
         self.async_write_ha_state()
         self.hass.bus.async_fire(const.EVENT)
 
+    def _async_set_triggered(self, context: Context):
+        """write the triggered state under context, reset after 1 minute
+
+        done before the actions are queued, so the logbook sees it first
+        and attributes the actions' context to this entity
+        """
+
+        @callback
+        async def async_trigger_finished(_now):
+            """internal timer is finished, reset the schedule"""
+            if self._state == AlarmControlPanelState.TRIGGERED:
+                self._state = STATE_ON
+            await self._timer_handler.async_start_timer()
+
+        self.async_set_context(context)
+        if self._timer:
+            self._timer()
+        self._timer = async_call_later(self.hass, 60, async_trigger_finished)
+        if self._state == STATE_ON:
+            self._state = AlarmControlPanelState.TRIGGERED
+        self.async_write_ha_state()
+
     @callback
     async def async_timer_finished(self, id: str):
         """fire actions when timer is finished"""
         if id != self.schedule_id:
             return
+
+        context = Context()
+        self._async_set_triggered(context)
 
         if self._state not in [STATE_OFF, const.STATE_COMPLETED]:
 
@@ -281,22 +306,10 @@ class ScheduleEntity(ToggleEntity):
                     )
                 )
                 await self._action_handler.async_queue_actions(
-                    self.schedule[const.ATTR_TIMESLOTS][self._current_slot]
+                    self.schedule[const.ATTR_TIMESLOTS][self._current_slot],
+                    context=context,
                 )
 
-        @callback
-        async def async_trigger_finished(_now):
-            """internal timer is finished, reset the schedule"""
-            if self._state == AlarmControlPanelState.TRIGGERED:
-                self._state = STATE_ON
-            await self._timer_handler.async_start_timer()
-
-        # keep the entity in triggered state for 1 minute, then restart the timer
-        self._timer = async_call_later(self.hass, 60, async_trigger_finished)
-        if self._state == STATE_ON:
-            self._state = AlarmControlPanelState.TRIGGERED
-
-        self.async_write_ha_state()
         self.hass.bus.async_fire(const.EVENT)
 
     async def async_cancel_timer(self):
@@ -540,6 +553,12 @@ class ScheduleEntity(ToggleEntity):
             "Executing actions for {}, timeslot {}, skip_conditions {}".format(self.entity_id, slot, skip_conditions)
         )
 
+        # child of the service call's context: logbook shows who ran the schedule
+        parent = self._context
+        context = Context(parent_id=parent.id, user_id=parent.user_id) if parent else Context()
+        self._async_set_triggered(context)
+
         await self._action_handler.async_queue_actions(
-            schedule
+            schedule,
+            context=context,
         )
